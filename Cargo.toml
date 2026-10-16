@@ -1,0 +1,73 @@
+[package]
+name = "clean_c"
+version = "0.1.0"
+edition = "2024"
+description = "磁盘安全清理工具 —— 基于 egui 的跨平台磁盘清理器（Windows / macOS / Linux）"
+authors = ["clean_c contributors"]
+
+[dependencies]
+# ---- GUI ----
+eframe = { version = "0.36", default-features = false, features = [
+    "default_fonts",
+    "wgpu",
+    "glow",
+] }
+
+# ---- 并行扫描（清理遍历是手写的递归，便于逐层套用安全检查） ----
+rayon = "1.12"
+
+# ---- 时间（日志与文件年龄过滤） ----
+chrono = "0.4"
+
+# ---- 设置持久化 ----
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ---- 图标解码（读取 assets/app_icon.ico 供窗口使用） ----
+# 树里 eframe 本来就依赖 image，这里只是多开一个 ico 解码器，不引入新的 crate
+image = { version = "0.25", default-features = false, features = ["ico"] }
+
+# ---- Windows 系统能力（磁盘容量 / 打开资源管理器） ----
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# ---- macOS / Linux 系统能力（磁盘容量 statvfs、root 权限判定） ----
+# 树里 eframe / chrono / rayon 本来就依赖 libc，这里只是显式声明，不引入新的 crate
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# ---- Linux 窗口后端 ----
+# 上面 `default-features = false` 关掉了 eframe 的默认特性，其中就包含 `x11` /
+# `wayland`。在 Windows / macOS 上窗口后端不是"特性开关"，所以一直没暴露出来；
+# 到了 Linux，winit 会因为没有后端而直接 `compile_error!`。
+# 这里只对 Linux 补上，Windows / macOS 的构建不会因此多编译任何东西。
+# 与 `[dependencies]` 里的 eframe 是同一个包（同一来源），Cargo 会把两处特性合并。
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.36", default-features = false, features = [
+    "default_fonts",
+    "wgpu",
+    "glow",
+    "x11",
+    "wayland",
+] }
+
+# ---- 发布构建：更小的体积 & 更高的运行性能 ----
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
