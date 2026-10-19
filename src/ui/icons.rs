@@ -10,6 +10,11 @@
 //!
 //! 每个图标都在**归一化的 0..1 方格**里描述，再映射到传入的 `Rect`，
 //! 所以调用方给多大就画多大，比例永远不变。
+//!
+//! 画法是 **duotone（双色调）**：主体先用同一主题色的半透明版填一层底，
+//! 再叠全色描边 —— 比"一根根细线"有体积感，17px 的侧栏小图标也不会糊成一团；
+//! 而且底色由传入的 `color` 推出来，选中态的绿色、未选态的灰色、彩色入口卡
+//! 上的前景色都自动成立，深浅主题不用各备一套。
 
 use eframe::egui::{self, Color32, Pos2, Rect, Shape, Stroke, pos2};
 
@@ -59,88 +64,102 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32, wi
     };
     let line = |pts: &[(f32, f32)]| -> Vec<Pos2> { pts.iter().map(|(x, y)| p(*x, *y)).collect() };
 
+    // duotone 底色：同一主题色降透明度（egui 的 Color32 是预乘 alpha，
+    // gamma_multiply 是预乘的正确做法，直接改 a 通道会把颜色洗白）。
+    let tint = |a: f32| color.gamma_multiply(a);
+    // 底色填充 + 描边一次画完（多边形必须是凸的 —— 下面的形状都保证凸）
+    let fill_stroke =
+        |pts: Vec<Pos2>, a: f32| painter.add(Shape::convex_polygon(pts, tint(a), stroke));
+
     match icon {
-        // 三层菱形堆叠：上面一个完整的菱形，下面两道"折线"
+        // 概览 —— 三层堆叠：顶层菱形上底色，下面两道"折线"
         Icon::Overview => {
-            let diamond = line(&[(0.50, 0.10), (0.90, 0.30), (0.50, 0.50), (0.10, 0.30)]);
-            painter.add(Shape::closed_line(diamond, stroke));
+            fill_stroke(
+                line(&[(0.50, 0.08), (0.90, 0.28), (0.50, 0.48), (0.10, 0.28)]),
+                0.26,
+            );
             painter.add(Shape::line(
-                line(&[(0.10, 0.50), (0.50, 0.68), (0.90, 0.50)]),
+                line(&[(0.10, 0.54), (0.50, 0.72), (0.90, 0.54)]),
                 stroke,
             ));
             painter.add(Shape::line(
-                line(&[(0.10, 0.68), (0.50, 0.86), (0.90, 0.68)]),
+                line(&[(0.10, 0.74), (0.50, 0.92), (0.90, 0.74)]),
                 stroke,
             ));
         }
 
-        // 垃圾桶：盖 + 提手 + 桶身 + 两道竖纹
+        // 垃圾桶：盖 + 提手 + 桶身（上底色）+ 两道竖纹
         Icon::Clean => {
-            painter.line_segment([p(0.13, 0.28), p(0.87, 0.28)], stroke);
+            // 提手（U 形，骑在盖上方）
             painter.add(Shape::line(
-                line(&[(0.36, 0.28), (0.36, 0.17), (0.64, 0.17), (0.64, 0.28)]),
+                line(&[(0.40, 0.26), (0.40, 0.14), (0.60, 0.14), (0.60, 0.26)]),
                 stroke,
             ));
-            painter.add(Shape::line(
-                line(&[(0.21, 0.28), (0.27, 0.87), (0.73, 0.87), (0.79, 0.28)]),
-                stroke,
-            ));
-            painter.line_segment([p(0.42, 0.42), p(0.44, 0.75)], stroke);
-            painter.line_segment([p(0.58, 0.42), p(0.56, 0.75)], stroke);
+            // 盖 —— 比桶口宽，经典垃圾桶比例
+            painter.line_segment([p(0.12, 0.30), p(0.88, 0.30)], stroke);
+            // 桶身梯形（收底）
+            fill_stroke(
+                line(&[(0.24, 0.38), (0.76, 0.38), (0.70, 0.90), (0.30, 0.90)]),
+                0.22,
+            );
+            // 两道竖纹
+            painter.line_segment([p(0.43, 0.50), p(0.44, 0.78)], stroke);
+            painter.line_segment([p(0.57, 0.50), p(0.56, 0.78)], stroke);
         }
 
-        // 折角文档 + 两道内容线
+        // 折角文档 + 两道内容线（大文件）
         Icon::BigFiles => {
-            painter.add(Shape::closed_line(
+            fill_stroke(
                 line(&[
-                    (0.24, 0.10),
-                    (0.60, 0.10),
-                    (0.78, 0.30),
-                    (0.78, 0.90),
-                    (0.24, 0.90),
+                    (0.26, 0.08),
+                    (0.60, 0.08),
+                    (0.80, 0.28),
+                    (0.80, 0.92),
+                    (0.26, 0.92),
                 ]),
-                stroke,
-            ));
+                0.20,
+            );
             painter.add(Shape::line(
-                line(&[(0.60, 0.10), (0.60, 0.30), (0.78, 0.30)]),
+                line(&[(0.60, 0.08), (0.60, 0.28), (0.80, 0.28)]),
                 stroke,
             ));
-            painter.line_segment([p(0.37, 0.52), p(0.66, 0.52)], stroke);
-            painter.line_segment([p(0.37, 0.68), p(0.58, 0.68)], stroke);
+            painter.line_segment([p(0.38, 0.52), p(0.68, 0.52)], stroke);
+            painter.line_segment([p(0.38, 0.68), p(0.60, 0.68)], stroke);
         }
 
-        // 立方体
+        // 软件卸载 —— 立方体包装盒：顶面上底色，棱线描边
         Icon::Apps => {
-            painter.add(Shape::closed_line(
-                line(&[(0.50, 0.09), (0.87, 0.29), (0.50, 0.49), (0.13, 0.29)]),
-                stroke,
-            ));
+            fill_stroke(
+                line(&[(0.50, 0.08), (0.88, 0.28), (0.50, 0.48), (0.12, 0.28)]),
+                0.30,
+            );
             painter.add(Shape::line(
                 line(&[
-                    (0.13, 0.29),
-                    (0.13, 0.71),
-                    (0.50, 0.91),
-                    (0.87, 0.71),
-                    (0.87, 0.29),
+                    (0.12, 0.28),
+                    (0.12, 0.70),
+                    (0.50, 0.92),
+                    (0.88, 0.70),
+                    (0.88, 0.28),
                 ]),
                 stroke,
             ));
-            painter.line_segment([p(0.50, 0.49), p(0.50, 0.91)], stroke);
+            painter.line_segment([p(0.50, 0.48), p(0.50, 0.92)], stroke);
         }
 
-        // 三条滑杆：线在圆钮处断开，再画一个圆钮
+        // 三条滑杆：线在圆钮处断开，圆钮画成实心 —— 实心钮是"滑杆"语义的关键，
+        // 空心圆在 17px 下会被误读成三个圈圈
         Icon::Settings => {
             for (y, knob) in [(0.24_f32, 0.34_f32), (0.50, 0.66), (0.76, 0.44)] {
-                let r = 0.10;
+                let r = 0.105;
                 painter.line_segment([p(0.12, y), p(knob - r, y)], stroke);
                 painter.line_segment([p(knob + r, y), p(0.88, y)], stroke);
-                painter.circle_stroke(p(knob, y), box_.width() * r, stroke);
+                painter.circle(p(knob, y), box_.width() * r, color, Stroke::NONE);
             }
         }
 
-        // 盾牌 + 勾
+        // 盾牌 + 勾：盾面上底色，勾全色压在上面
         Icon::Safety => {
-            painter.add(Shape::closed_line(
+            fill_stroke(
                 line(&[
                     (0.50, 0.08),
                     (0.85, 0.22),
@@ -149,62 +168,61 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32, wi
                     (0.15, 0.50),
                     (0.15, 0.22),
                 ]),
-                stroke,
-            ));
+                0.22,
+            );
             painter.add(Shape::line(
-                line(&[(0.34, 0.48), (0.45, 0.61), (0.67, 0.36)]),
+                line(&[(0.33, 0.48), (0.45, 0.62), (0.68, 0.36)]),
                 stroke,
             ));
         }
 
-        // 放大镜：镜片 + 斜柄，镜片里一道小横线
+        // 放大镜：镜片上底色 + 斜柄
         Icon::Scan => {
-            painter.circle_stroke(p(0.42, 0.42), box_.width() * 0.27, stroke);
+            let r = box_.width() * 0.27;
+            painter.circle(p(0.42, 0.42), r, tint(0.22), stroke);
             painter.line_segment([p(0.62, 0.62), p(0.88, 0.88)], stroke);
-            painter.line_segment([p(0.30, 0.42), p(0.54, 0.42)], stroke);
         }
 
-        // 重复文件：后面一张折角文档错位叠着，前面一张实线文档
+        // 重复文件：后面一张折角文档错位叠着，前面一张上底色
         Icon::Duplicates => {
             // 后一张（往右上偏）
             painter.add(Shape::line(
-                line(&[(0.34, 0.10), (0.64, 0.10), (0.80, 0.26), (0.80, 0.72)]),
+                line(&[(0.36, 0.08), (0.66, 0.08), (0.82, 0.24), (0.82, 0.70)]),
                 stroke,
             ));
             // 前一张
-            painter.add(Shape::closed_line(
+            fill_stroke(
                 line(&[
-                    (0.20, 0.28),
-                    (0.52, 0.28),
-                    (0.68, 0.44),
-                    (0.68, 0.90),
-                    (0.20, 0.90),
+                    (0.18, 0.26),
+                    (0.50, 0.26),
+                    (0.66, 0.42),
+                    (0.66, 0.92),
+                    (0.18, 0.92),
                 ]),
-                stroke,
-            ));
+                0.20,
+            );
             painter.add(Shape::line(
-                line(&[(0.52, 0.28), (0.52, 0.44), (0.68, 0.44)]),
+                line(&[(0.50, 0.26), (0.50, 0.42), (0.66, 0.42)]),
                 stroke,
             ));
-            painter.line_segment([p(0.31, 0.62), p(0.57, 0.62)], stroke);
-            painter.line_segment([p(0.31, 0.76), p(0.50, 0.76)], stroke);
+            painter.line_segment([p(0.30, 0.64), p(0.54, 0.64)], stroke);
+            painter.line_segment([p(0.30, 0.78), p(0.48, 0.78)], stroke);
         }
 
         // 显示器：屏幕 + 立柱 + 底座横线，语义是"系统/这台电脑"，
         // 和「设置」页的滑杆图标区分开（齿轮容易被读成设置）。
+        // 屏幕上底色后就不再画里面的"面板线" —— 17px 下会糊。
         Icon::System => {
-            let screen = Rect::from_min_max(p(0.10, 0.16), p(0.90, 0.66));
+            let screen = Rect::from_min_max(p(0.10, 0.14), p(0.90, 0.64));
+            painter.rect_filled(screen, egui::CornerRadius::same(3), tint(0.22));
             painter.rect_stroke(
                 screen,
-                egui::CornerRadius::same(2),
+                egui::CornerRadius::same(3),
                 stroke,
                 egui::StrokeKind::Middle,
             );
-            painter.line_segment([p(0.50, 0.66), p(0.50, 0.80)], stroke);
-            painter.line_segment([p(0.30, 0.85), p(0.70, 0.85)], stroke);
-            // 屏幕里一道"面板"短线，避免大片空白
-            painter.line_segment([p(0.24, 0.32), p(0.52, 0.32)], stroke);
-            painter.line_segment([p(0.24, 0.45), p(0.64, 0.45)], stroke);
+            painter.line_segment([p(0.50, 0.64), p(0.50, 0.80)], stroke);
+            painter.line_segment([p(0.28, 0.87), p(0.72, 0.87)], stroke);
         }
 
         // 微信 / QQ：直接画 assets 里的品牌 SVG。
