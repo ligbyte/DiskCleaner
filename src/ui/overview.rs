@@ -5,7 +5,7 @@
 
 use eframe::egui::{self, Align, Color32, Layout, Rect, RichText, Sense, vec2};
 
-use crate::app::{App, Page};
+use crate::app::{App, BigState, DupState, Page};
 use crate::cleaner::CleanMode;
 use crate::model::{human_bytes, thousands};
 use crate::sysutil;
@@ -149,7 +149,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui,
             &p,
             p.safe,
-            "文档、桌面、下载、图片、视频、音乐目录一律不扫描、不清理。",
+            "文档、桌面、下载、图片、视频、音乐目录一律不扫描、不清理；微信 / QQ 只清白名单内的缓存目录。",
         );
         bullet(
             ui,
@@ -341,65 +341,79 @@ fn hero(app: &mut App, ui: &mut egui::Ui, p: &Palette) {
 // ---------------------------------------------------------------------------
 
 /// 入口图的色调。纯装饰，两套主题共用同几个中间调，所以不放进 `Palette`。
-const TINT_BLUE: Color32 = Color32::from_rgb(0x3B, 0x9B, 0xF6);
-const TINT_AMBER: Color32 = Color32::from_rgb(0xF5, 0x9E, 0x0B);
-const TINT_VIOLET: Color32 = Color32::from_rgb(0x8B, 0x6C, 0xF6);
-const TINT_SLATE: Color32 = Color32::from_rgb(0x64, 0x78, 0x8C);
-const TINT_CYAN: Color32 = Color32::from_rgb(0x14, 0xB8, 0xD4);
+pub(crate) const TINT_BLUE: Color32 = Color32::from_rgb(0x3B, 0x9B, 0xF6);
+pub(crate) const TINT_VIOLET: Color32 = Color32::from_rgb(0x8B, 0x6C, 0xF6);
+pub(crate) const TINT_SLATE: Color32 = Color32::from_rgb(0x64, 0x78, 0x8C);
+pub(crate) const TINT_CYAN: Color32 = Color32::from_rgb(0x14, 0xB8, 0xD4);
+/// 微信品牌绿（入口卡图标用）。
+pub(crate) const TINT_WECHAT: Color32 = Color32::from_rgb(0x2A, 0xA8, 0x5C);
 
 fn quick_entries(app: &mut App, ui: &mut egui::Ui, p: &Palette) {
-    let summary = app.summary().cloned();
-    let scanned = summary.is_some();
-    let total = summary.as_ref().map(|s| s.total_bytes()).unwrap_or(0);
-    let clean_sub = if scanned {
-        format!("{} 可清理", human_bytes(total))
-    } else {
-        "缓存与临时文件".to_string()
+    // 各入口的副标题 = 该专项的"体积"，有数据给数据，没数据引导扫描
+    let clean_bytes = app.summary().map(|s| s.total_bytes()).unwrap_or(0);
+    let big_top = match &app.big {
+        BigState::Done { files, .. } => files.first().map(|f| f.size).unwrap_or(0),
+        _ => 0,
+    };
+    let dup_bytes: u64 = match &app.dup {
+        DupState::Done { groups, .. } => groups.iter().map(|g| g.reclaimable()).sum(),
+        _ => 0,
+    };
+    let sys_bytes = app.scoped_bytes(Page::System.scope().unwrap_or(&[]));
+    let wx_bytes = app.scoped_bytes(Page::Wechat.scope().unwrap_or(&[]));
+    let qq_bytes = app.scoped_bytes(Page::Qq.scope().unwrap_or(&[]));
+
+    let size_label = |bytes: u64, hint: &str| -> String {
+        if bytes > 0 {
+            human_bytes(bytes)
+        } else {
+            hint.to_string()
+        }
     };
 
-    // 图标 / 色调 / 标题 / 副文案 / 目标页
+    // 图标 / 色调 / 标题 / 副文案 / 目标页 —— 布局照参考图：第一行 4 张、第二行 2 张
     let entries: [(icons::Icon, Color32, &str, String, Page); 6] = [
         (
             icons::Icon::Clean,
             p.accent,
-            "智能清理",
-            clean_sub,
+            "垃圾文件",
+            size_label(clean_bytes, "点击扫描"),
             Page::Clean,
         ),
         (
             icons::Icon::BigFiles,
             TINT_BLUE,
             "大文件",
-            "找出最占地方的文件".into(),
+            size_label(big_top, "点击扫描"),
             Page::BigFiles,
         ),
         (
-            icons::Icon::Apps,
-            TINT_AMBER,
-            "软件卸载",
-            "统计占用并逐个卸载".into(),
-            Page::Apps,
-        ),
-        (
-            icons::Icon::Overview,
+            icons::Icon::Duplicates,
             TINT_VIOLET,
-            "全部结果",
-            "大文件与大文件夹清单".into(),
-            Page::BigDetail,
+            "重复文件",
+            size_label(dup_bytes, "点击扫描"),
+            Page::Duplicates,
         ),
         (
-            icons::Icon::Settings,
+            icons::Icon::System,
             TINT_SLATE,
-            "设置",
-            "清理策略与外观".into(),
-            Page::Settings,
+            "系统",
+            size_label(sys_bytes, "点击扫描"),
+            Page::System,
         ),
         (
-            icons::Icon::Safety,
+            icons::Icon::Wechat,
+            TINT_WECHAT,
+            "微信",
+            size_label(wx_bytes, "点击扫描"),
+            Page::Wechat,
+        ),
+        (
+            icons::Icon::Qq,
             TINT_CYAN,
-            "安全说明",
-            "保护名单与承诺".into(),
-            Page::Safety,
+            "QQ",
+            size_label(qq_bytes, "点击扫描"),
+            Page::Qq,
         ),
     ];
 

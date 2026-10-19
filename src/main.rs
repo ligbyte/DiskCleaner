@@ -14,6 +14,7 @@ mod app;
 mod apps;
 mod bigfiles;
 mod cleaner;
+mod duplicates;
 mod model;
 mod recycle;
 mod safety;

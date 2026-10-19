@@ -1,4 +1,4 @@
-//! 智能清理页：选类别、扫描、看明细、执行清理。
+//! 垃圾文件页（原「智能清理」）：选类别、扫描、看明细、执行清理。
 //!
 //! 整页的节奏照抄参考图（360清理Pro 的「一键清理」页，空闲态 + 扫描中态两张）：
 //!
@@ -61,8 +61,12 @@ use crate::ui::widgets::{self, card, pill, risk_pill};
 const HERO_TITLE: f32 = 33.0;
 /// 第二行副标题（参考图 ≈ 23px，等比放大一点但不跟到 1.19，免得两行差不多大）
 const HERO_SUB: f32 = 26.0;
-/// 插画边长（参考图那块插画占右上约 340×145，本程序用方形的 disk1.png）
-const HERO_ART: f32 = 168.0;
+/// 插画边长。
+///
+/// 和概览页的 `HERO_ART_SIZE` 取同一个值（220）—— 两个页面的右上角是同一张
+/// disk1.png，尺寸不一致会明显看出"换页之后图变小了"。版面高度同样是这一档：
+/// 两页的中心面板上边距一致，插画方块一样大，落点就自然对齐了。
+const HERO_ART: f32 = 220.0;
 
 /// 卡片行：卡片之间的横向间隙（参考图实测 14px）
 const CARD_GAP: f32 = 17.0;
@@ -291,12 +295,13 @@ fn hero(app: &mut App, ui: &mut egui::Ui, p: &Palette) {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| match &art {
             Some(tex) => {
                 let (rect, _) = ui.allocate_exact_size(vec2(HERO_ART, HERO_ART), Sense::hover());
-                ui.painter().image(
-                    tex.id(),
-                    rect,
-                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+                // 裁剪后的素材**不是正方形**（原 256×256 裁掉透明边后是一张宽扁的
+                // 磁盘图），直接铺满方块会横向压扁。按真实宽高比等比缩放、在方块
+                // 里居中 —— 和概览页 Hero 的画法保持一致。
+                let size = tex.size_vec2();
+                let scale = (rect.width() / size.x).min(rect.height() / size.y);
+                egui::Image::new(tex)
+                    .paint_at(ui, Rect::from_center_size(rect.center(), size * scale));
             }
             // 素材解码失败的兜底：画一块圆角方块，不至于开天窗
             None => {
@@ -743,9 +748,12 @@ fn cta_kind(app: &App) -> CtaKind {
 fn big_button(app: &App, ui: &mut egui::Ui, p: &Palette, actions: &mut Vec<Action>) {
     let full = ui.available_width();
     let kind = cta_kind(app);
+    let busy = matches!(kind, CtaKind::Busy);
 
+    // 外发光 / 雷达扫尾 / 脉冲波都会画出圆外最多 ~15px，容器要留出这个领空，
+    // 否则会被下一行内容压住（egui 不裁剪画笔，但会跟下面的字打架）。
     ui.allocate_ui_with_layout(
-        vec2(full, CIRCLE + 6.0),
+        vec2(full, CIRCLE + 32.0),
         Layout::top_down(Align::Center),
         |ui| {
             let (rect, resp) = ui.allocate_exact_size(Vec2::splat(CIRCLE), Sense::click());
@@ -753,9 +761,13 @@ fn big_button(app: &App, ui: &mut egui::Ui, p: &Palette, actions: &mut Vec<Actio
             let center = rect.center();
             let radius = CIRCLE / 2.0;
 
-            let fill = match kind {
+            // 底色：扫描中用更饱和的绿；平时悬停提亮一档。
+            // 「一键清理」再往深里压一档 —— 它是真正要执行删除的那一下，
+            // 颜色比"扫描"重一点才分得开。
+            let base = match kind {
                 CtaKind::Busy => p.cta_busy,
-                _ => {
+                CtaKind::Clean => mix(p.cta, p.accent, 0.35),
+                CtaKind::Scan | CtaKind::Rescan => {
                     if resp.hovered() {
                         mix(p.cta, Color32::WHITE, 0.14)
                     } else {
@@ -763,15 +775,18 @@ fn big_button(app: &App, ui: &mut egui::Ui, p: &Palette, actions: &mut Vec<Actio
                     }
                 }
             };
-            painter.circle_filled(center, radius, fill);
-            // 扫描中套一圈更亮的内环 —— 参考图里那颗圆圈边上就有一道亮边，
-            // 静态时没有，是"正在动"的视觉信号。
-            if matches!(kind, CtaKind::Busy) {
-                painter.circle_stroke(
-                    center,
-                    radius - 2.0,
-                    Stroke::new(2.0, mix(fill, Color32::WHITE, 0.55)),
-                );
+
+            // 球面渐变圆盘 + 外发光 + 玻璃高光
+            let glow = if resp.hovered() || busy { 1.0 } else { 0.62 };
+            paint_cta_disc(painter, center, radius, base, glow);
+
+            if busy {
+                // 扫描中：进度环 + 雷达扫尾 + 脉冲波，全部吃时间参数
+                let t = ui.ctx().input(|i| i.time) as f32;
+                paint_cta_radar(painter, center, radius, base, scan_ratio(app), t);
+                // 下一次重绘越快动画越顺；只在扫描中花这个电
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(16));
             }
 
             match kind {
@@ -785,6 +800,13 @@ fn big_button(app: &App, ui: &mut egui::Ui, p: &Palette, actions: &mut Vec<Actio
                         30.0,
                         14.0,
                         p.cta_ink,
+                    );
+                    painter.text(
+                        center + vec2(0.0, 26.0),
+                        Align2::CENTER_CENTER,
+                        "扫描中",
+                        FontId::proportional(10.5),
+                        cta_alpha(p.cta_ink, 150),
                     );
                 }
                 CtaKind::Scan => {
@@ -820,11 +842,212 @@ fn big_button(app: &App, ui: &mut egui::Ui, p: &Palette, actions: &mut Vec<Actio
                     CtaKind::Busy => {}
                 }
             }
-            if resp.hovered() && !matches!(kind, CtaKind::Busy) {
+            if resp.hovered() && !busy {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
         },
     );
+}
+
+/// 同色不同透明度。
+fn cta_alpha(c: Color32, a: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
+}
+
+/// 大圆的主体：落影 + 侧壁厚度 + 球面渐变 + 镜面高光。
+///
+/// 立体感由四层叠出来（从下往上）：
+/// 1. **落影** —— 向下偏移的一叠低透明度圆形，圆"离开页面"浮起来；
+/// 2. **侧壁** —— 再往下一档的实心圆，只在底部露出一条深色月牙，等于厚度；
+/// 3. **球面** —— 三角形网格做两段径向渐变（高光 → 中间调 → 暗边），
+///    光心偏左上，比单段线性渐变更像球；
+/// 4. **高光** —— 顶上一段偏白的镜面弧 + 左下一条反光弧，玻璃质感。
+///
+/// `Mesh` 是硬边光栅化（像素中心进轮廓就涂满），所以轮廓的柔和感全靠
+/// 一圈 1px 描边接住，外发光的描边环把边缘往外羽化。
+fn paint_cta_disc(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    base: Color32,
+    glow: f32,
+) {
+    // ---- 1) 落影：越靠内越实，整体压在圆的正下方 ----
+    const SHADOW_STEPS: usize = 10;
+    for i in 0..SHADOW_STEPS {
+        let t = i as f32 / (SHADOW_STEPS - 1) as f32; // 0 = 最外圈
+        let r = radius * (0.80 + 0.24 * t) + 2.0;
+        let a = ((3.0 + t * 7.0) * if glow > 0.8 { 1.25 } else { 1.0 }) as u8;
+        painter.circle_filled(
+            center + vec2(0.0, 6.0 + t * 2.0),
+            r,
+            Color32::from_black_alpha(a),
+        );
+    }
+
+    // ---- 2) 外发光：一圈圈往外淡出的细环，悬停 / 扫描中变强 ----
+    let glow_col = mix(base, Color32::WHITE, 0.12);
+    const GLOW_STEPS: usize = 9;
+    for i in 0..GLOW_STEPS {
+        let t = i as f32 / (GLOW_STEPS - 1) as f32;
+        let r = radius + 2.0 + t * 10.0;
+        let a = ((1.0 - t) * (1.0 - t) * 70.0 * glow) as u8;
+        if a == 0 {
+            continue;
+        }
+        painter.circle_stroke(center, r, Stroke::new(3.5, cta_alpha(glow_col, a)));
+    }
+
+    // ---- 3) 侧壁：往下偏移的实心圆，只在底部露出一道深色月牙 = 厚度 ----
+    let dark = mix(base, Color32::BLACK, 0.34);
+    painter.circle_filled(center + vec2(0.0, 4.0), radius + 1.0, dark);
+
+    // ---- 4) 球面：两段径向渐变（光心 → 中间调 → 暗边） ----
+    let hot = mix(base, Color32::WHITE, 0.46);
+    let mid = mix(base, Color32::WHITE, 0.10);
+    let rim = mix(base, Color32::BLACK, 0.24);
+    const SEGMENTS: usize = 72;
+    let dir = |i: usize| {
+        let a = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        vec2(a.cos(), a.sin())
+    };
+    let light = center + vec2(-radius * 0.28, -radius * 0.32);
+
+    let mut mesh = egui::Mesh::default();
+    // 光心
+    mesh.colored_vertex(light, hot);
+    // 内环（0.56r）与外环（r）
+    for i in 0..=SEGMENTS {
+        mesh.colored_vertex(center + dir(i) * (radius * 0.56), mid);
+    }
+    for i in 0..=SEGMENTS {
+        mesh.colored_vertex(center + dir(i) * radius, rim);
+    }
+    let inner = |i: usize| 1 + i as u32;
+    let outer = |i: usize| 1 + (SEGMENTS as u32 + 1) + i as u32;
+    for i in 0..SEGMENTS as u32 {
+        mesh.add_triangle(0, inner(i as usize), inner(i as usize + 1));
+        mesh.add_triangle(inner(i as usize), outer(i as usize), outer(i as usize + 1));
+        mesh.add_triangle(
+            inner(i as usize),
+            outer(i as usize + 1),
+            inner(i as usize + 1),
+        );
+    }
+    painter.add(egui::Shape::mesh(mesh));
+
+    // ---- 5) 轮廓：一条略深的细边把硬边接住，也让圆在浅底上立得住 ----
+    painter.circle_stroke(
+        center,
+        radius,
+        Stroke::new(1.0, cta_alpha(mix(base, Color32::BLACK, 0.30), 190)),
+    );
+
+    // ---- 6) 高光：顶部镜面弧 + 底部反光弧 ----
+    let arc = |from: f32, to: f32, r: f32, stroke: Stroke| {
+        const N: usize = 28;
+        let pts: Vec<egui::Pos2> = (0..=N)
+            .map(|i| {
+                let a = from + (to - from) * i as f32 / N as f32;
+                center + vec2(a.cos() * r, a.sin() * r)
+            })
+            .collect();
+        painter.add(egui::Shape::line(pts, stroke));
+    };
+    let hr = radius - 3.0;
+    // 屏幕坐标 y 向下，负角是上半圆。宽而淡的一层 + 窄而亮的一层
+    arc(
+        -std::f32::consts::PI * 0.88,
+        -std::f32::consts::PI * 0.12,
+        hr,
+        Stroke::new(5.0, cta_alpha(Color32::WHITE, 38)),
+    );
+    arc(
+        -std::f32::consts::PI * 0.80,
+        -std::f32::consts::PI * 0.28,
+        hr,
+        Stroke::new(2.0, cta_alpha(Color32::WHITE, 150)),
+    );
+    // 左下的一小段反光，让球面有"被环境照亮"的第二光源
+    arc(
+        std::f32::consts::PI * 0.30,
+        std::f32::consts::PI * 0.62,
+        hr,
+        Stroke::new(2.2, cta_alpha(Color32::WHITE, 55)),
+    );
+    // 底部内阴影：压住下缘，球才"坐"得下去
+    arc(
+        std::f32::consts::PI * 0.12,
+        std::f32::consts::PI * 0.88,
+        radius - 5.0,
+        Stroke::new(4.0, cta_alpha(mix(base, Color32::BLACK, 0.45), 40)),
+    );
+}
+
+/// 扫描中的三件套：进度环、雷达扫尾、脉冲波。
+///
+/// `t` 是秒（egui 的 `input.time`），`ratio` 是 0..1 的扫描进度。
+fn paint_cta_radar(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    base: Color32,
+    ratio: f32,
+    t: f32,
+) {
+    let arc = |from: f32, to: f32, r: f32, stroke: Stroke| {
+        let n = (((to - from).abs() / 0.12) as usize).clamp(2, 96);
+        let pts: Vec<egui::Pos2> = (0..=n)
+            .map(|i| {
+                let a = from + (to - from) * i as f32 / n as f32;
+                center + vec2(a.cos() * r, a.sin() * r)
+            })
+            .collect();
+        painter.add(egui::Shape::line(pts, stroke));
+    };
+
+    // ---- 进度环：贴着圆盘内缘一圈，白轨道 + 白进度 ----
+    let pr = radius - 9.0;
+    painter.circle_stroke(center, pr, Stroke::new(4.0, cta_alpha(Color32::WHITE, 60)));
+    if ratio > 0.003 {
+        let start = -std::f32::consts::FRAC_PI_2;
+        let end = start + std::f32::consts::TAU * ratio.clamp(0.01, 1.0);
+        arc(
+            start,
+            end,
+            pr,
+            Stroke::new(4.0, cta_alpha(Color32::WHITE, 235)),
+        );
+    }
+
+    // ---- 雷达扫尾：外缘一圈旋转的彗尾，越靠头部越亮 ----
+    let spin = t * std::f32::consts::TAU * 0.85;
+    let tail = 1.7;
+    const TAIL_STEPS: usize = 16;
+    for i in 0..TAIL_STEPS {
+        let f0 = i as f32 / TAIL_STEPS as f32;
+        let f1 = (i + 1) as f32 / TAIL_STEPS as f32;
+        let a0 = spin - tail + tail * f0;
+        let a1 = spin - tail + tail * f1;
+        let p0 = center + vec2(a0.cos(), a0.sin()) * (radius + 4.5);
+        let p1 = center + vec2(a1.cos(), a1.sin()) * (radius + 4.5);
+        let a = (f0 * f0 * 140.0) as u8;
+        if a == 0 {
+            continue;
+        }
+        painter.add(egui::Shape::line(
+            vec![p0, p1],
+            Stroke::new(2.5, cta_alpha(Color32::WHITE, a)),
+        ));
+    }
+
+    // ---- 脉冲波：从圆边往外扩散、边走边淡出的圆环 ----
+    let pulse = (t / 1.6) % 1.0;
+    let pr_r = radius + 2.0 + pulse * 11.0;
+    let pa = ((1.0 - pulse) * (1.0 - pulse) * 80.0) as u8;
+    if pa > 0 {
+        painter.circle_stroke(center, pr_r, Stroke::new(1.5, cta_alpha(base, pa)));
+    }
 }
 
 /// 把「12.4 GB」拆成数字和单位两段，圆按钮里数字大、单位小。

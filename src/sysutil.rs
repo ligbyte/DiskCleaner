@@ -170,6 +170,22 @@ pub fn user_data_dir() -> Option<PathBuf> {
     env_path("XDG_DATA_HOME").or_else(|| home_dir().map(|home| home.join(".local").join("share")))
 }
 
+/// 用户的「文档」目录（QQ / 微信的数据目录默认就在它下面）。
+///
+/// Windows 上「文档」可以被重定向到其它盘，严格做法要读 shell 元数据；
+/// 这里按惯例取 `USERPROFILE\Documents`，绝大多数机器上是准的，取不到
+/// 返回 `None`，让上层跳过对应目标即可。
+pub fn documents_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        env_path("USERPROFILE").map(|home| home.join("Documents"))
+    }
+    #[cfg(not(windows))]
+    {
+        env_path("XDG_DOCUMENTS_DIR").or_else(|| home_dir().map(|home| home.join("Documents")))
+    }
+}
+
 /// 应用自己的数据目录。
 ///
 /// * Windows：`%LOCALAPPDATA%\CleanC`

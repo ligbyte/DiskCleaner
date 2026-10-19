@@ -9,6 +9,7 @@ use eframe::egui;
 use crate::apps::{self, AppHandle, AppMsg, InstalledApp};
 use crate::bigfiles::{self, BigFileHandle, BigFileMsg};
 use crate::cleaner::{self, CleanHandle, CleanMsg, CleanOptions};
+use crate::duplicates::{self, DupGroup, DupHandle, DupMsg};
 use crate::model::{
     BigFile, BigFolder, CleanReport, CleanTarget, DiskInfo, Group, ScanSummary, TargetResult,
 };
@@ -26,11 +27,20 @@ use crate::ui;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Overview,
+    /// 垃圾文件（原「智能清理」）：全部白名单目标的扫描 + 清理
     Clean,
     Apps,
     BigFiles,
     /// 大文件的完整列表页 —— 由「大文件」页的「查看更多」跳进来，不出现在左侧导航里
     BigDetail,
+    /// 重复文件：在用户目录里找内容完全相同的文件
+    Duplicates,
+    /// 系统设置（系统级清理）：只看系统文件与高级项两个分组
+    System,
+    /// 微信专项清理
+    Wechat,
+    /// QQ 专项清理
+    Qq,
     Settings,
     Safety,
 }
@@ -39,10 +49,14 @@ impl Page {
     pub fn title(self) -> &'static str {
         match self {
             Page::Overview => "概览",
-            Page::Clean => "智能清理",
+            Page::Clean => "垃圾文件",
             Page::Apps => "软件卸载",
             Page::BigFiles => "大文件",
             Page::BigDetail => "全部结果",
+            Page::Duplicates => "重复文件",
+            Page::System => "系统",
+            Page::Wechat => "微信",
+            Page::Qq => "QQ",
             Page::Settings => "设置",
             Page::Safety => "安全说明",
         }
@@ -55,8 +69,22 @@ impl Page {
             Page::Apps => "统计每个软件占用的空间，用它自己的方式把它卸载掉",
             Page::BigFiles => "找出占用空间最大的文件，自行决定如何处理",
             Page::BigDetail => "大文件与大文件夹的完整列表，可以直接在这里处理",
+            Page::Duplicates => "在常用目录里找出内容完全相同的文件，删掉多余副本",
+            Page::System => "系统更新残留、日志与高级清理项，动它们之前多看一眼",
+            Page::Wechat => "清理微信的日志与缩略图缓存，聊天记录与接收的文件不受影响",
+            Page::Qq => "清理 QQ 的日志与聊天图片视频缓存，聊天记录不受影响",
             Page::Settings => "调整清理策略、删除方式与界面偏好",
             Page::Safety => "这个工具凭什么说自己「安全」",
+        }
+    }
+
+    /// 专项清理页的扫描范围（只扫这些分组）。返回 `None` 表示不是专项页。
+    pub fn scope(self) -> Option<&'static [Group]> {
+        match self {
+            Page::System => Some(&[Group::SystemFiles, Group::Advanced]),
+            Page::Wechat => Some(&[Group::Wechat]),
+            Page::Qq => Some(&[Group::Qq]),
+            _ => None,
         }
     }
 }
@@ -178,11 +206,30 @@ pub enum Dialog {
     ConfirmUninstall(Box<InstalledApp>),
     /// 删除整个大目录前的确认（比删单个文件重得多，必须拦一道）
     ConfirmRecycleFolder(Box<BigFolder>),
+    /// 批量把重复文件移入回收站前的确认（paths, bytes）
+    ConfirmDuplicates(Vec<std::path::PathBuf>, u64),
     Report(Box<CleanReport>),
     Message {
         title: String,
         body: String,
         kind: ToastKind,
+    },
+}
+
+/// 重复文件扫描的状态。
+pub enum DupState {
+    Idle,
+    Running {
+        handle: DupHandle,
+        started: Instant,
+        scanned: u64,
+        current: String,
+    },
+    Done {
+        groups: Vec<DupGroup>,
+        scanned: u64,
+        elapsed_ms: u64,
+        canceled: bool,
     },
 }
 
@@ -211,6 +258,10 @@ pub struct App {
     pub scan: ScanState,
     pub clean: CleanState,
     pub big: BigState,
+
+    /// 重复文件扫描状态；勾选中要移入回收站的副本路径
+    pub dup: DupState,
+    pub dup_selected: std::collections::BTreeSet<PathBuf>,
 
     /// 已安装软件（扫描填充）
     pub apps: Vec<InstalledApp>,
@@ -284,6 +335,8 @@ impl App {
             scan: ScanState::Idle,
             clean: CleanState::Idle,
             big: BigState::Idle,
+            dup: DupState::Idle,
+            dup_selected: std::collections::BTreeSet::new(),
             apps: Vec::new(),
             apps_scan: AppScanState::Idle,
             apps_query: String::new(),
@@ -337,8 +390,12 @@ impl App {
         matches!(self.big, BigState::Running { .. })
     }
 
+    pub fn dup_scanning(&self) -> bool {
+        matches!(self.dup, DupState::Running { .. })
+    }
+
     pub fn busy(&self) -> bool {
-        self.scanning() || self.cleaning() || self.big_scanning()
+        self.scanning() || self.cleaning() || self.big_scanning() || self.dup_scanning()
     }
 
     /// 当前扫描结果（若已完成）。
@@ -389,6 +446,30 @@ impl App {
         (list, files, bytes)
     }
 
+    /// [`Self::pending_selection`] 的分组过滤版：专项清理页只提交自己范围内的目标。
+    pub fn pending_selection_in(&self, groups: &[Group]) -> (Vec<CleanTarget>, u64, u64) {
+        let (list, files, bytes) = self.pending_selection();
+        let list = list
+            .into_iter()
+            .filter(|t| groups.contains(&t.group))
+            .collect();
+        (list, files, bytes)
+    }
+
+    /// 某几个分组里已扫描出、且已勾选的可清理体积（专项页的大按钮和概览入口用）。
+    pub fn scoped_bytes(&self, groups: &[Group]) -> u64 {
+        let mut bytes = 0u64;
+        for t in &self.targets {
+            if !groups.contains(&t.group) || !self.selected.contains(t.id) {
+                continue;
+            }
+            if let Some(r) = self.result_for(t.id) {
+                bytes += r.bytes;
+            }
+        }
+        bytes
+    }
+
     // -----------------------------------------------------------------
     // 扫描
     // -----------------------------------------------------------------
@@ -407,6 +488,41 @@ impl App {
             current: String::new(),
             finished: 0,
             total: self.targets.len(),
+            live: Vec::new(),
+        };
+    }
+
+    /// 专项清理的**范围扫描**：只扫指定分组的目标。
+    ///
+    /// 结果仍写进同一份 `scan` 状态 —— 各专项页读结果时按分组过滤，
+    /// 而「垃圾文件」页对没扫到的目标自然显示"未扫描"。
+    pub fn start_scan_scoped(&mut self, groups: &[Group]) {
+        if self.scanning() {
+            return;
+        }
+        let targets: Vec<CleanTarget> = self
+            .targets
+            .iter()
+            .filter(|t| groups.contains(&t.group))
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            self.toast(
+                "本机没有找到对应的可清理目录（未安装或数据目录被自定义到了其它位置）",
+                ToastKind::Info,
+            );
+            return;
+        }
+        let opts = ScanOptions {
+            min_age_days: self.settings.min_age_days,
+        };
+        let handle = scanner::spawn(targets.clone(), opts);
+        self.scan = ScanState::Running {
+            handle,
+            started: Instant::now(),
+            current: String::new(),
+            finished: 0,
+            total: targets.len(),
             live: Vec::new(),
         };
     }
@@ -512,6 +628,40 @@ impl App {
                     "还没有勾选任何项目",
                     "在下面的列表里勾选想清理的类别，或点「全选有内容的」一键选中所有扫描出内容的项目。",
                 )
+            };
+            self.dialog = Some(Dialog::Message {
+                title: title.to_string(),
+                body: body.to_string(),
+                kind: ToastKind::Warn,
+            });
+            return;
+        }
+        self.dialog = Some(Dialog::ConfirmClean(Box::new(CleanConfirm {
+            targets,
+            opts: CleanOptions {
+                mode: self.settings.clean_mode,
+                min_age_days: self.settings.min_age_days,
+                dry_run: self.settings.dry_run,
+            },
+            files,
+            bytes,
+        })));
+    }
+
+    /// 专项清理页的确认弹窗：只提交该页范围内的目标。
+    pub fn request_clean_scoped(&mut self, groups: &[Group]) {
+        if self.cleaning() {
+            return;
+        }
+        let (targets, files, bytes) = self.pending_selection_in(groups);
+        if targets.is_empty() {
+            let (title, body) = if self.summary().is_none() {
+                (
+                    "还没有扫描结果",
+                    "请先点击「开始扫描」——扫描只会读取文件信息，不会删除任何东西。",
+                )
+            } else {
+                ("还没有勾选任何项目", "在下面的列表里勾选想清理的类别。")
             };
             self.dialog = Some(Dialog::Message {
                 title: title.to_string(),
@@ -800,6 +950,202 @@ impl App {
             }
             Err(msg) => self.toast(format!("未删除：{msg}"), ToastKind::Error),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // 重复文件
+    // -----------------------------------------------------------------
+
+    /// 开始重复文件扫描：根目录复用「大文件」页的扫描范围（用户自己的目录）。
+    pub fn start_dup_scan(&mut self) {
+        if self.dup_scanning() || self.big_scanning() {
+            return;
+        }
+        if self.big_roots.is_empty() {
+            self.toast("请先在「设置」里添加至少一个扫描目录", ToastKind::Warn);
+            return;
+        }
+        let handle = duplicates::spawn(self.big_roots.clone());
+        self.dup = DupState::Running {
+            handle,
+            started: Instant::now(),
+            scanned: 0,
+            current: String::new(),
+        };
+    }
+
+    pub fn cancel_dup_scan(&mut self) {
+        if let DupState::Running { handle, .. } = &self.dup {
+            handle.cancel();
+        }
+    }
+
+    fn poll_dup(&mut self) {
+        let state = std::mem::replace(&mut self.dup, DupState::Idle);
+        let DupState::Running {
+            handle,
+            started,
+            mut scanned,
+            mut current,
+        } = state
+        else {
+            self.dup = state;
+            return;
+        };
+
+        let mut outcome = None;
+        loop {
+            match handle.rx.try_recv() {
+                Ok(DupMsg::Started) => {}
+                Ok(DupMsg::Progress {
+                    scanned: s,
+                    current: c,
+                }) => {
+                    scanned = s;
+                    current = c;
+                }
+                Ok(DupMsg::Finished {
+                    groups,
+                    scanned: s,
+                    elapsed_ms,
+                    canceled,
+                }) => {
+                    outcome = Some((groups, s, elapsed_ms, canceled));
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        match outcome {
+            Some((groups, scanned, elapsed_ms, canceled)) => {
+                let group_count = groups.len();
+                let reclaimable: u64 = groups.iter().map(|g| g.reclaimable()).sum();
+                // 默认勾选：每组保留最早修改的一份，其余副本全部选中
+                self.dup_selected = groups
+                    .iter()
+                    .flat_map(|g| {
+                        let keep = g.keep_index();
+                        g.files
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| *i != keep)
+                            .map(|(_, f)| f.path.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                self.dup = DupState::Done {
+                    groups,
+                    scanned,
+                    elapsed_ms,
+                    canceled,
+                };
+                if canceled {
+                    self.toast("重复文件扫描已取消", ToastKind::Warn);
+                } else if group_count == 0 {
+                    self.toast("扫描完成，没有发现重复文件", ToastKind::Success);
+                } else {
+                    self.toast(
+                        format!(
+                            "发现 {group_count} 组重复文件，最多可释放 {}",
+                            crate::model::human_bytes(reclaimable)
+                        ),
+                        ToastKind::Success,
+                    );
+                }
+            }
+            None => {
+                self.dup = DupState::Running {
+                    handle,
+                    started,
+                    scanned,
+                    current,
+                };
+            }
+        }
+    }
+
+    /// 勾选 / 取消一个重复副本。
+    pub fn toggle_dup(&mut self, path: &Path) {
+        if self.dup_selected.contains(path) {
+            self.dup_selected.remove(path);
+        } else {
+            self.dup_selected.insert(path.to_path_buf());
+        }
+    }
+
+    /// 把整个重复文件组勾 / 取消（除保留那份之外的所有副本）。
+    pub fn toggle_dup_group(&mut self, group: &DupGroup, checked: bool) {
+        let keep = group.keep_index();
+        for (i, f) in group.files.iter().enumerate() {
+            if i == keep {
+                continue;
+            }
+            if checked {
+                self.dup_selected.insert(f.path.clone());
+            } else {
+                self.dup_selected.remove(&f.path);
+            }
+        }
+    }
+
+    /// 弹出批量移入回收站的确认框。
+    pub fn request_recycle_duplicates(&mut self) {
+        if self.dup_selected.is_empty() {
+            self.toast("请先勾选要清理的重复副本", ToastKind::Warn);
+            return;
+        }
+        let bytes: u64 = self
+            .dup_selected
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum();
+        let paths: Vec<PathBuf> = self.dup_selected.iter().cloned().collect();
+        self.dialog = Some(Dialog::ConfirmDuplicates(paths, bytes));
+    }
+
+    /// 真正把勾选的重复副本移入回收站。
+    pub fn recycle_duplicates_confirmed(&mut self, paths: Vec<PathBuf>) {
+        let mut freed = 0u64;
+        let mut done = 0usize;
+        let mut blocked = 0usize;
+        for path in &paths {
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            match bigfiles::recycle_one(path, &self.big_roots) {
+                Ok(()) => {
+                    freed += size;
+                    done += 1;
+                    self.dup_selected.remove(path);
+                }
+                Err(_) => blocked += 1,
+            }
+        }
+        // 从结果里移除已经清掉的副本；组里剩不到两份就整个删掉
+        if let DupState::Done { groups, .. } = &mut self.dup {
+            groups.retain_mut(|g| {
+                g.files.retain(|f| !paths.contains(&f.path));
+                g.files.len() >= 2
+            });
+        }
+        if blocked > 0 {
+            self.toast(
+                format!(
+                    "已移入回收站 {done} 个文件、释放 {}；{blocked} 个被安全层拦截",
+                    crate::model::human_bytes(freed)
+                ),
+                ToastKind::Warn,
+            );
+        } else {
+            self.toast(
+                format!(
+                    "已移入回收站 {done} 个重复副本，释放 {}",
+                    crate::model::human_bytes(freed)
+                ),
+                ToastKind::Success,
+            );
+        }
+        self.refresh_disk(true);
     }
 
     // -----------------------------------------------------------------
@@ -1149,6 +1495,7 @@ impl eframe::App for App {
         self.poll_clean();
         self.poll_big();
         self.poll_apps();
+        self.poll_dup();
         self.poll_toasts();
         self.refresh_disk(false);
         self.maybe_save_settings();
@@ -1204,6 +1551,9 @@ impl eframe::App for App {
                         Page::Apps => ui::apps_page::show(self, ui),
                         Page::BigFiles => ui::bigfiles_page::show(self, ui),
                         Page::BigDetail => ui::bigfiles_page::show_all(self, ui),
+                        Page::Duplicates => ui::duplicates_page::show(self, ui),
+                        // 系统设置 / 微信 / QQ：同一套专项清理页，只是扫描范围不同
+                        Page::System | Page::Wechat | Page::Qq => ui::scope_page::show(self, ui),
                         Page::Settings => ui::settings_page::show(self, ui),
                         Page::Safety => ui::safety_page::show(self, ui),
                     });

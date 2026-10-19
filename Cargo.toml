@@ -25,7 +25,7 @@ serde_json = "1"
 
 # ---- 图标解码（读取 assets/app_icon.ico 供窗口使用） ----
 # 树里 eframe 本来就依赖 image，这里只是多开一个 ico 解码器，不引入新的 crate
-image = { version = "0.25", default-features = false, features = ["ico"] }
+image = { version = "0.25", default-features = false, features = ["ico", "webp"] }
 
 # ---- Windows 系统能力（磁盘容量 / 打开资源管理器） ----
 [target.'cfg(windows)'.dependencies]

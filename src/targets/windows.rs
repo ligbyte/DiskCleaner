@@ -467,5 +467,179 @@ pub fn build() -> Vec<CleanTarget> {
         note: Some("若系统更新未完成，删除会失去回滚能力。"),
     });
 
+    // -----------------------------------------------------------------
+    // 微信 / QQ 专项缓存
+    //
+    // 聊天记录本体（数据库）一个字节都不碰；只清"删了也能再生"的缓存：
+    // 日志、崩溃转储、缩略图、图片视频的本地缓存副本。
+    // 账号目录是动态探测的（用户可能把数据目录挪到任意盘），探测不到就
+    // 不生成对应目标，界面上自然也不会出现。
+    // -----------------------------------------------------------------
+
+    let wechat_roots = wechat_cache_roots();
+    if !wechat_roots.is_empty() {
+        list.push(CleanTarget {
+            id: "wechat-cache",
+            name: "微信缓存",
+            desc: "微信的日志、崩溃转储与图片/视频缩略图缓存。聊天记录与接收到的文件不受影响。",
+            group: Group::Wechat,
+            risk: RiskLevel::Safe,
+            requires_admin: false,
+            default_on: true,
+            age_filtered: false,
+            roots: wechat_roots,
+            note: Some("只清理可再生成的缓存；清掉后聊天里的图片会重新从服务器加载。"),
+        });
+    }
+
+    let qq_safe_roots = qq_log_roots();
+    if !qq_safe_roots.is_empty() {
+        list.push(CleanTarget {
+            id: "qq-logs",
+            name: "QQ 日志缓存",
+            desc: "QQ 的运行日志与日志缓存目录，删除后由 QQ 自动重建。",
+            group: Group::Qq,
+            risk: RiskLevel::Safe,
+            requires_admin: false,
+            default_on: true,
+            age_filtered: false,
+            roots: qq_safe_roots,
+            note: None,
+        });
+    }
+
+    let qq_media_roots = qq_media_roots();
+    if !qq_media_roots.is_empty() {
+        list.push(CleanTarget {
+            id: "qq-media",
+            name: "QQ 聊天图片视频缓存",
+            desc: "聊天中图片 / 视频 / 表情在本地的缓存副本。清理后聊天窗口需要重新加载原图。",
+            group: Group::Qq,
+            risk: RiskLevel::Caution,
+            requires_admin: false,
+            default_on: false,
+            age_filtered: false,
+            roots: qq_media_roots,
+            note: Some("默认不勾选：清掉后历史聊天里的图片要重新下载才能看清。"),
+        });
+    }
+
     list
+}
+
+/// 微信缓存根目录：日志/崩溃转储（Roaming）+ 聊天媒体缩略图缓存（数据目录）。
+///
+/// 数据目录（`xwechat_files` / `WeChat Files`）允许用户自定义位置，这里按
+/// 常见位置探测：用户主目录、「文档」目录。只递归一层找账号目录，
+/// 每个账号下取 `msg\cache`、`msg\thumb`（4.x）与 `FileStorage\Cache`（3.x）。
+fn wechat_cache_roots() -> Vec<Root> {
+    let mut roots = Vec::new();
+
+    // Roaming 下的运行日志与崩溃转储 —— 完全安全
+    if let Some(base) = roaming(r"Tencent\xwechat") {
+        for sub in ["log", "crashinfo"] {
+            let dir = base.join(sub);
+            if dir.is_dir() {
+                roots.push(Root::all(dir));
+            }
+        }
+    }
+
+    // 聊天数据目录：逐个候选位置探测
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(home) = sysutil::home_dir() {
+        bases.push(home.join("xwechat_files"));
+        if let Some(doc) = documents_dir() {
+            bases.push(doc.join("xwechat_files"));
+            bases.push(doc.join("WeChat Files"));
+        }
+    }
+    for base in bases {
+        let Ok(accounts) = std::fs::read_dir(&base) else {
+            continue;
+        };
+        for account in accounts.flatten() {
+            if !account.path().is_dir() {
+                continue;
+            }
+            let path = account.path();
+            // 4.x：msg\cache（可再生的消息缓存）与 msg\thumb（缩略图）
+            for sub in [r"msg\cache", r"msg\thumb"] {
+                let dir = path.join(sub);
+                if dir.is_dir() {
+                    roots.push(Root::all(dir));
+                }
+            }
+            // 3.x：FileStorage\Cache
+            let legacy = path.join(r"FileStorage\Cache");
+            if legacy.is_dir() {
+                roots.push(Root::all(legacy));
+            }
+        }
+    }
+    roots
+}
+
+/// QQ 日志类缓存（安全，默认清理）。
+fn qq_log_roots() -> Vec<Root> {
+    let mut roots = Vec::new();
+    for dir in qq_account_dirs() {
+        // QQ NT：nt_qq\nt_data\log、log-cache
+        for sub in [r"nt_qq\nt_data\log", r"nt_qq\nt_data\log-cache"] {
+            let dir = dir.join(sub);
+            if dir.is_dir() {
+                roots.push(Root::all(dir));
+            }
+        }
+        // 老版本 QQ：FileStorage\Cache
+        let legacy = dir.join(r"FileStorage\Cache");
+        if legacy.is_dir() {
+            roots.push(Root::all(legacy));
+        }
+    }
+    roots
+}
+
+/// QQ 聊天媒体缓存（谨慎，默认不清理）。
+fn qq_media_roots() -> Vec<Root> {
+    let mut roots = Vec::new();
+    for dir in qq_account_dirs() {
+        for sub in [
+            r"nt_qq\nt_data\Pic",
+            r"nt_qq\nt_data\Video",
+            r"nt_qq\nt_data\Emoji",
+        ] {
+            let dir = dir.join(sub);
+            if dir.is_dir() {
+                roots.push(Root::all(dir));
+            }
+        }
+    }
+    roots
+}
+
+/// 探测「文档\Tencent Files」下的所有 QQ 账号目录。
+fn qq_account_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(doc) = documents_dir() {
+        let base = doc.join(r"Tencent Files");
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// 「文档」目录（优先读 shell 变量，取不到退回主目录拼接）。
+fn documents_dir() -> Option<PathBuf> {
+    if let Some(doc) = sysutil::documents_dir() {
+        return Some(doc);
+    }
+    sysutil::home_dir().map(|home| home.join("Documents"))
 }

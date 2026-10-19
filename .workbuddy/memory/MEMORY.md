@@ -4,7 +4,10 @@
 核心诉求是**安全清理**：白名单 + 默认拒绝，宁可不删也不误删。
 
 ## 目录与模块
-`src/{main, app, model, targets/*, scanner, cleaner, recycle, safety, settings, sysutil, theme, advice, bigfiles, apps, ui/*}`
+`src/{main, app, model, targets/*, scanner, cleaner, recycle, safety, settings, sysutil, theme, advice, bigfiles, apps, duplicates, ui/*}`
+`src/ui/` 里 `svg_icon.rs` 是极简 SVG 光栅化（微信/QQ 品牌图标用 assets 里的
+qq.svg / wechat.svg 编译进二进制；支持 `<path d>` + nonzero/evenodd + viewBox，
+不支持 transform/渐变/文字）。egui 0.36 判深色主题用 `ctx.theme() == Theme::Dark`。
 
 ## 跨平台架构约定（重要）
 - **`sysutil` 是唯一直接接触操作系统的模块**。其它模块一律通过它拿路径、容量、

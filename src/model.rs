@@ -48,15 +48,21 @@ pub enum Group {
     Browsers,
     Apps,
     Advanced,
+    /// 微信的日志 / 缩略图等缓存（专项清理页）
+    Wechat,
+    /// QQ 的日志 / 聊天图片视频缓存（专项清理页）
+    Qq,
 }
 
 impl Group {
-    pub const ALL: [Group; 5] = [
+    pub const ALL: [Group; 7] = [
         Group::UserFiles,
         Group::SystemFiles,
         Group::Browsers,
         Group::Apps,
         Group::Advanced,
+        Group::Wechat,
+        Group::Qq,
     ];
 
     pub fn title(self) -> &'static str {
@@ -66,6 +72,8 @@ impl Group {
             Group::Browsers => "浏览器缓存",
             Group::Apps => "应用 / 显卡缓存",
             Group::Advanced => "高级项（默认关闭）",
+            Group::Wechat => "微信缓存",
+            Group::Qq => "QQ 缓存",
         }
     }
 }

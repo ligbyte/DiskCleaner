@@ -481,6 +481,58 @@ fn hits_protected_tree(normalized: &str) -> bool {
         .any(|tree| is_within(tree, normalized))
 }
 
+/// **豁免子树**：位于用户资料目录内部、但被硬编码白名单明确允许清理的目录。
+///
+/// 微信 / QQ 的缓存目录默认就在「文档」深处（`Documents\Tencent Files\...`、
+/// `Documents\xwechat_files\...`），而「文档」整体在用户保护区里 —— 不加豁免，
+/// 这两个专项清理永远扫到 0 字节。豁免只覆盖下面这几个**写死的前缀**：
+///
+/// * `Documents\Tencent Files`（QQ 数据目录）
+/// * `Documents\xwechat_files`（微信 4.x 数据目录）
+/// * `Documents\WeChat Files`（微信 3.x 数据目录）
+/// * `Roaming\Tencent\xwechat`（微信运行日志）
+///
+/// 豁免**只**放行"用户资料目录"这一层保护；系统目录保护、保护文件名、
+/// 符号链接检查全部照旧。实际能删的仍然只有白名单根目录内的路径。
+fn allowed_user_subtrees() -> &'static [String] {
+    static CELL: OnceLock<Vec<String>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |base: PathBuf| {
+            let n = norm(&base);
+            if !n.is_empty() {
+                out.push(n);
+            }
+        };
+        if let Some(doc) = crate::sysutil::documents_dir() {
+            push(doc.join("Tencent Files"));
+            push(doc.join("xwechat_files"));
+            push(doc.join("WeChat Files"));
+        }
+        // 微信 4.x 的运行日志目录只有 Windows 上在 Roaming（macOS / Linux 的
+        // 腾讯系目录本来就在 Documents 里，上面已经覆盖）
+        #[cfg(windows)]
+        if let Some(roaming) = crate::sysutil::roaming_app_data() {
+            push(roaming.join("Tencent").join("xwechat"));
+        }
+        out
+    })
+}
+
+/// 路径是否落在豁免子树内。
+fn in_allowed_subtree(normalized: &str) -> bool {
+    allowed_user_subtrees()
+        .iter()
+        .any(|t| is_within(t, normalized))
+}
+
+/// "用户资料目录"保护检查（带豁免）。
+///
+/// 路径在用户资料目录内**且**不在豁免子树里 → 受保护。
+fn hits_user_protected(normalized: &str) -> bool {
+    user_protected().iter().any(|t| is_within(t, normalized)) && !in_allowed_subtree(normalized)
+}
+
 /// 文件名是否属于"绝对不允许删除"的关键文件（廉价检查，用于扫描阶段预筛）。
 pub fn is_protected_file_name(name: &str) -> bool {
     PROTECTED_FILE_NAMES.contains(&name.to_ascii_lowercase().as_str())
@@ -505,7 +557,7 @@ pub fn is_protected(path: &Path) -> bool {
     if normalized.is_empty() || is_fs_root(&normalized) {
         return true;
     }
-    hits_protected_tree(&normalized) || user_protected().iter().any(|t| is_within(t, &normalized))
+    hits_protected_tree(&normalized) || hits_user_protected(&normalized)
 }
 
 /// 路径是否命中**系统级**保护目录树（系统目录、程序目录、回收站…）。
@@ -595,7 +647,7 @@ pub fn verify(path: &Path, root: &Path, is_symlink: bool) -> Result<(), Reject> 
     if hits_protected_tree(&p) {
         return Err(Reject::ProtectedTree);
     }
-    if user_protected().iter().any(|t| is_within(t, &p)) {
+    if hits_user_protected(&p) {
         return Err(Reject::ProtectedTree);
     }
 
@@ -624,7 +676,7 @@ pub fn verify_root(root: &Path) -> Result<(), Reject> {
     if hits_protected_tree(&r) {
         return Err(Reject::ProtectedTree);
     }
-    if user_protected().iter().any(|t| is_within(t, &r)) {
+    if hits_user_protected(&r) {
         return Err(Reject::ProtectedTree);
     }
     Ok(())

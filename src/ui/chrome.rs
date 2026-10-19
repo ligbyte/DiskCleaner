@@ -7,9 +7,8 @@ use eframe::egui::{
 
 use crate::app::{App, BigState, CleanState, Page, ScanState, ToastKind};
 use crate::model::{human_bytes, thousands};
-use crate::settings::ThemePref;
 use crate::sysutil;
-use crate::theme::{Palette, PillKind};
+use crate::theme::Palette;
 use crate::ui::icons;
 use crate::ui::widgets;
 
@@ -82,7 +81,7 @@ pub fn title_bar(ui: &mut egui::Ui) {
                 ui.painter().text(
                     egui::pos2(rect.left() + 16.0, rect.center().y),
                     Align2::LEFT_CENTER,
-                    "磁盘清理 · CleanC",
+                    "磁盘清理工具",
                     egui::FontId::proportional(11.5),
                     p.text_faint,
                 );
@@ -257,13 +256,11 @@ pub fn resize_handles(ctx: &egui::Context) {
 // 顶栏
 // ---------------------------------------------------------------------------
 
-/// 顶栏的总高度，以及扣掉上下内边距之后留给内容的高度。
+/// 顶栏的总高度。
 const TOP_BAR_HEIGHT: f32 = 64.0;
-const TOP_BAR_INNER: f32 = TOP_BAR_HEIGHT - 20.0;
 
 pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
     let p = Palette::of(ui);
-    let ctx = ui.ctx().clone();
 
     egui::Panel::top("cleanc_topbar")
         .exact_size(TOP_BAR_HEIGHT)
@@ -277,52 +274,15 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                 .inner_margin(Margin::symmetric(22, 10)),
         )
         .show(ui, |ui| {
-            ui.horizontal_centered(|ui| {
-                // 宽度在这里**手算**，不靠布局自己分。
-                //
-                // 直接"左边标题 + 右边靠右排"是不行的：副标题是 `Page::subtitle()`
-                // 里的页面文案，长度不受这一层控制，而横向布局里的 `Label` 又不换行，
-                // 长文案会直接压到磁盘信息上。反过来先摆右侧、再让标题吃剩下的宽度
-                // 也不行 —— 嵌套的那层 `Ui` 在 RTL 方向上量出来的可用宽度是错的，
-                // 标题会被挤成一列一个字。
-                let full = ui.available_width();
-                let right_w = (full * 0.62).min(660.0);
-                let title_w = (full - right_w).max(120.0);
-
-                ui.allocate_ui_with_layout(
-                    vec2(title_w, TOP_BAR_INNER),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        // 标题统一收到顶栏，页内就不再重复一遍大标题了
-                        let (head, sub) = (app.page.title(), app.page.subtitle());
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            ui.label(RichText::new(head).size(17.0).color(p.text));
-                            let room = (ui.available_width() - 6.0).max(24.0);
-                            let sub = clip_to_width(&p, ui, sub, 11.0, room);
-                            ui.label(RichText::new(sub).size(11.0).color(p.text_faint));
-                        });
-                    },
-                );
-
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    // 主题切换
-                    theme_switch(ui, app, &p, &ctx);
-
-                    ui.add_space(10.0);
-
-                    // 权限状态
-                    if app.admin {
-                        widgets::pill(ui, sysutil::privilege_label(), PillKind::Safe, &p);
-                    } else {
-                        let resp = ui
-                            .horizontal(|ui| widgets::pill(ui, "普通权限", PillKind::Caution, &p))
-                            .response;
-                        resp.on_hover_text(sysutil::elevation_hint());
-                    }
-
-                    ui.add_space(6.0);
-                    disk_mini(ui, app, &p);
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                // 标题统一收到顶栏，页内就不再重复一遍大标题了
+                let (head, sub) = (app.page.title(), app.page.subtitle());
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.label(RichText::new(head).size(17.0).color(p.text));
+                    let room = (ui.available_width() - 6.0).max(24.0);
+                    let sub = clip_to_width(&p, ui, sub, 11.0, room);
+                    ui.label(RichText::new(sub).size(11.0).color(p.text_faint));
                 });
             });
         });
@@ -354,22 +314,6 @@ fn clip_to_width(p: &Palette, ui: &egui::Ui, text: &str, size: f32, max_width: f
     "…".to_string()
 }
 
-/// 顶栏右上角的主题切换。
-///
-/// 只是一层「主题枚举 ↔ 序号」的映射，样式与点选逻辑全部交给
-/// [`widgets::segmented`]，保证和设置页「外观」那一处长得完全一样。
-fn theme_switch(ui: &mut egui::Ui, app: &mut App, p: &Palette, ctx: &egui::Context) {
-    let labels: Vec<&str> = ThemePref::ALL.iter().map(|pref| pref.label()).collect();
-    let selected = ThemePref::ALL
-        .iter()
-        .position(|pref| *pref == app.settings.theme)
-        .unwrap_or(0);
-
-    if let Some(index) = widgets::segmented(ui, p, &labels, selected, widgets::SEGMENTED_HEIGHT) {
-        app.apply_theme(ThemePref::ALL[index], ctx);
-    }
-}
-
 fn paint_logo(ui: &mut egui::Ui, p: &Palette, rect: Rect) {
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::same(10), p.accent);
@@ -388,13 +332,14 @@ fn paint_logo(ui: &mut egui::Ui, p: &Palette, rect: Rect) {
 }
 
 // ---------------------------------------------------------------------------
-// 品牌图标（assets/disk.png）
+// 品牌图标（assets/disk.webp）
 // ---------------------------------------------------------------------------
 
 /// 顶栏品牌图标。`include_bytes!` 编进可执行文件，单文件分发不会丢图。
-const LOGO_PNG: &[u8] = include_bytes!("../../assets/disk.png");
+/// （2026-10 起素材从 disk.png 换成了体积只有 1/4 的 disk.png。）
+const LOGO_PNG: &[u8] = include_bytes!("../../assets/disk.webp");
 
-/// 取品牌图标贴图：第一次调用时解码 `assets/disk.png` 并上传成 GPU 贴图，之后一直复用。
+/// 取品牌图标贴图：第一次调用时解码 `assets/disk.webp` 并上传成 GPU 贴图，之后一直复用。
 ///
 /// 缓存放在 `App` 上而不是全局变量，是为了让贴图跟着 egui 上下文一起生灭 ——
 /// wgpu 后端初始化失败时会换 Glow 再开一次，全局缓存那样会留下失效的句柄。
@@ -406,21 +351,23 @@ fn logo_texture(app: &mut App, ctx: &egui::Context) -> Option<egui::TextureHandl
                     Some(ctx.load_texture("cleanc_logo", image, egui::TextureOptions::LINEAR));
             }
             Err(err) => {
-                eprintln!("assets/disk.png 解码失败（{err}），顶栏改用内置绘制的图标");
+                eprintln!("assets/disk.webp 解码失败（{err}），顶栏改用内置绘制的图标");
             }
         }
     }
     app.logo_tex.clone()
 }
 
-/// 解码 PNG 并裁掉四周的透明留白，只留图形主体（外加 4px 呼吸边）。
+/// 解码图标（PNG / WebP 按内容自动识别）并裁掉四周的透明留白，只留图形主体
+/// （外加 4px 呼吸边）。
 ///
 /// 源图是 256×256、四周透明边很大的图标，直接整幅绘制的话有效图形
 /// 只有六成大，还会带一片不可见区域干扰布局，所以这里先裁再上传。
 ///
 /// 顶栏品牌图标与概览页的磁盘卡片共用这一套处理。
 pub(crate) fn decode_icon_png(bytes: &[u8]) -> Result<egui::ColorImage, image::ImageError> {
-    let rgba = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)?.into_rgba8();
+    // 按内容猜格式：顶栏是 webp、概览页大图是 png，一套解码通吃
+    let rgba = image::load_from_memory(bytes)?.into_rgba8();
     let (width, height) = rgba.dimensions();
     let (width, height) = (width as usize, height as usize);
     let buf = rgba.into_raw();
@@ -461,55 +408,6 @@ pub(crate) fn decode_icon_png(bytes: &[u8]) -> Result<egui::ColorImage, image::I
     Ok(egui::ColorImage::from_rgba_unmultiplied([cw, ch], &cropped))
 }
 
-fn disk_mini(ui: &mut egui::Ui, app: &App, p: &Palette) {
-    let Some(disk) = &app.disk else {
-        ui.label(
-            RichText::new(format!(
-                "{} 容量读取失败",
-                sysutil::mount_label(&sysutil::default_mount())
-            ))
-            .size(11.5)
-            .color(p.text_faint),
-        );
-        return;
-    };
-
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = 3.0;
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let (rect, _) = ui.allocate_exact_size(vec2(120.0, 7.0), Sense::hover());
-            let ratio = disk.used_ratio();
-            let painter = ui.painter();
-            painter.rect_filled(rect, CornerRadius::same(4), p.inset);
-            if ratio > 0.0 {
-                let w = (rect.width() * ratio).max(7.0);
-                painter.rect_filled(
-                    Rect::from_min_size(rect.min, vec2(w, rect.height())),
-                    CornerRadius::same(4),
-                    crate::theme::usage_color(p, ratio),
-                );
-            }
-            ui.label(
-                RichText::new(format!("{:.0}%", ratio * 100.0))
-                    .size(12.0)
-                    .strong()
-                    .color(crate::theme::usage_color(p, ratio)),
-            );
-            ui.add_space(2.0);
-            ui.label(
-                RichText::new(format!(
-                    "{} {} / {}",
-                    sysutil::mount_label(&disk.mount),
-                    human_bytes(disk.used()),
-                    human_bytes(disk.total)
-                ))
-                .size(11.5)
-                .color(p.text_weak),
-            );
-        });
-    });
-}
-
 // ---------------------------------------------------------------------------
 // 侧边导航
 // ---------------------------------------------------------------------------
@@ -523,7 +421,17 @@ const NAV_WIDTH: f32 = 212.0;
 /// 分组只影响导航的排布，和页面本身没有耦合。
 const NAV_GROUPS: &[(&str, &[Page])] = &[
     ("", &[Page::Overview]),
-    ("专项清理", &[Page::Clean, Page::BigFiles]),
+    (
+        "专项清理",
+        &[
+            Page::Clean,
+            Page::BigFiles,
+            Page::Duplicates,
+            Page::System,
+            Page::Wechat,
+            Page::Qq,
+        ],
+    ),
     ("应用", &[Page::Apps]),
     ("系统", &[Page::Settings, Page::Safety]),
 ];
@@ -651,6 +559,10 @@ fn nav_icon(page: Page) -> icons::Icon {
         Page::Clean => icons::Icon::Clean,
         Page::Apps => icons::Icon::Apps,
         Page::BigFiles | Page::BigDetail => icons::Icon::BigFiles,
+        Page::Duplicates => icons::Icon::Duplicates,
+        Page::System => icons::Icon::System,
+        Page::Wechat => icons::Icon::Wechat,
+        Page::Qq => icons::Icon::Qq,
         Page::Settings => icons::Icon::Settings,
         Page::Safety => icons::Icon::Safety,
     }
@@ -659,13 +571,25 @@ fn nav_icon(page: Page) -> icons::Icon {
 fn nav_badge(app: &App, page: Page) -> Option<String> {
     match page {
         Page::Clean => {
-            let (targets, _, bytes) = app.pending_selection();
+            let (_, _, bytes) = app.pending_selection();
             if bytes > 0 {
-                let _ = targets;
                 Some(human_bytes(bytes))
             } else {
                 None
             }
+        }
+        // 专项页：显示该范围内已扫出、已勾选的体积
+        Page::System => {
+            let bytes = app.scoped_bytes(Page::System.scope().unwrap());
+            (bytes > 0).then(|| human_bytes(bytes))
+        }
+        Page::Wechat => {
+            let bytes = app.scoped_bytes(Page::Wechat.scope().unwrap());
+            (bytes > 0).then(|| human_bytes(bytes))
+        }
+        Page::Qq => {
+            let bytes = app.scoped_bytes(Page::Qq.scope().unwrap());
+            (bytes > 0).then(|| human_bytes(bytes))
         }
         _ => None,
     }
@@ -817,7 +741,7 @@ fn idle_status(app: &App, p: &Palette) -> (String, Color32) {
         );
     }
     (
-        "就绪 · 建议先到「智能清理」执行一次扫描，看清每一类会删掉什么再动手".to_string(),
+        "就绪 · 建议先到「垃圾文件」执行一次扫描，看清每一类会删掉什么再动手".to_string(),
         p.text_faint,
     )
 }
